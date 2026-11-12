@@ -2,9 +2,16 @@
 
 Publish a read-only table from a Splunk Enterprise index or saved report. Choose the fields and time window in Splunk Web, preview the snapshot, and issue an expiring OpenSharing profile. Recipients read the published data over HTTPS with a standard client. They need only the profile and access to the OpenShare gateway.
 
-**[Download OpenShare 0.2.0 (.spl)](https://raw.githubusercontent.com/dpwtheitguy/SplunkAppForOpenShareProtocol/main/packages/openshare-0.2.0.spl)** · [SHA-256 checksum](packages/openshare-0.2.0.spl.sha256) · [Install on Splunk Enterprise](#install-on-splunk-enterprise) · [Run the Docker lab](#run-the-docker-lab)
+**[Download OpenShare 0.3.0 (.spl)](https://raw.githubusercontent.com/dpwtheitguy/SplunkAppForOpenShareProtocol/main/packages/openshare-0.3.0.spl)** · [SHA-256 checksum](packages/openshare-0.3.0.spl.sha256) · [Install on Splunk Enterprise](#install-on-splunk-enterprise) · [Run the Docker lab](#run-the-docker-lab)
 
-Tested on standalone Splunk Enterprise 10.6.1 on Linux. The Splunk package provides the publisher UI and requires a separately deployed OpenShare companion service. Splunk Cloud Platform has not been validated.
+The Splunk package provides the publisher UI and requires a separately deployed OpenShare companion service. It uses the Python standard library and Splunk’s bundled REST bindings, with no packages to install into Splunk’s Python. Parquet and HTTP server libraries live in the companion container. Splunk Cloud Platform, Windows, and clustered deployments are outside the validation scope.
+
+| Validated deployment | Splunk handler runtime |
+| --- | --- |
+| Standalone Splunk Enterprise 9.4.16 on Linux | Bundled Python 3.9 |
+| Standalone Splunk Enterprise 10.6.1 on Linux | Bundled Python 3.13, with a Python 3.9 fallback |
+
+The same `.spl` passed the browser and recipient regression on both releases. [Splunk 9.4 REST handler settings](https://help.splunk.com/en/data-management/splunk-enterprise-admin-manual/9.4/configuration-file-reference/9.4.16-configuration-file-reference/restmap.conf) [Splunk 10.6 REST handler settings](https://help.splunk.com/en/data-management/splunk-enterprise-admin-manual/10.6/configuration-file-reference/10.6.0-configuration-file-reference/restmap.conf)
 
 ## See it work
 
@@ -25,7 +32,7 @@ The demo uses synthetic billing and identity events. The recipient container has
 Use the companion source from the same revision as the app. The companion stores grant state and Parquet snapshots in `/data`. Provision a persistent volume and two separate random secrets of at least 32 characters. Use the same integration key on the Splunk and companion hosts. Keep the file-signing key on the companion host.
 
 ```bash
-docker build -t openshare-companion:0.2.0 ./service
+docker build -t openshare-companion:0.3.0 ./service
 docker volume create openshare-data
 docker run -d --name openshare-companion --restart unless-stopped \
   -p 127.0.0.1:9000:9000 \
@@ -35,14 +42,14 @@ docker run -d --name openshare-companion --restart unless-stopped \
   --mount type=bind,source=/path/to/integration-key,target=/run/secrets/integration-key,readonly \
   --mount type=bind,source=/path/to/file-signing-key,target=/run/secrets/file-signing-key,readonly \
   --mount type=volume,source=openshare-data,target=/data \
-  openshare-companion:0.2.0
+  openshare-companion:0.3.0
 ```
 
 Replace the hostname and secret paths with your deployment values. Terminate TLS at a gateway on the companion host. Route the published hostname’s OpenSharing discovery, table, and signed file routes to the loopback service. Use [the lab’s NGINX route rules](lab/nginx.conf) as a starting point and replace the lab hostname, port, certificate paths, and upstream address. Route `POST /private/manage` on a separate private HTTPS listener reachable only by Splunk. Use the configured hostname in the TLS certificate and exclude authorization headers and signed URLs from gateway logs.
 
 ### 2. Install and configure the Splunk app
 
-With the archive and checksum in the same directory, run `sha256sum -c openshare-0.2.0.spl.sha256` before uploading.
+With the archive and checksum in the same directory, run `sha256sum -c openshare-0.3.0.spl.sha256` before uploading.
 
 1. In Splunk Web, go to **Apps → Manage Apps → Install app from file** and upload the versioned `.spl`. For an existing `openshare` install, choose **Upgrade app**.
 2. On the Splunk host, create `$SPLUNK_HOME/etc/apps/openshare/local/openshare.conf` using the example below. The integration key file must be readable by the Splunk OS account and protected from other users. Use the private gateway URL without the `/private/manage` suffix.
@@ -63,7 +70,7 @@ Omit `ca_file` when the private certificate chains to the host’s trusted CA st
 2. Send the **Network guide** to your network engineer. Generate an expiring profile for the recipient and hand it off as a credential.
 3. The recipient uses the profile with an OpenSharing client. See the Python example below. Use **Activity** to review reads, **Refresh** to publish updated results, and **Access Tokens** to rotate or revoke credentials.
 
-For a Splunk audit index, mount or forward the companion’s optional audit export. The companion writes JSONL to `AUDIT_EXPORT_DIR` when that directory exists. Use the [lab monitor configuration](lab/splunk/inputs.conf) as a template and restrict access to the `openshare_audit` index. The Activity screen reads the companion’s audit state directly.
+For a Splunk audit index, mount or forward the companion’s optional audit export. The companion writes OCSF JSONL to `AUDIT_EXPORT_DIR` when that directory exists. Use the [lab monitor configuration](lab/splunk/inputs.conf) as a template and restrict access to the `openshare_audit` index. The Activity screen reads the companion’s audit state directly.
 
 ## Run the Docker lab
 
@@ -167,11 +174,36 @@ flowchart LR
 | Splunk management, publishing, and storage | Private Docker network or volumes |
 | Recipient profile | A bearer credential scoped to one share. The service stores a SHA-256 verifier. |
 
-Admins can use **Logging** to toggle recipient access auditing and enable verbose diagnostics for 30 minutes. The app keeps audit events for share and grant changes. To inspect the Splunk audit mirror, sign in as `admin` using `SPLUNK_PASSWORD` from `.lab/env` and run:
+## Audit logging
+
+Admins can toggle recipient access auditing and enable verbose diagnostics for 30 minutes. Share, grant, and logging-setting changes remain auditable. The audit export uses **OCSF 1.7.0 API Activity** (class 6003) for publishing, refresh, grant changes, snapshot requests, file transfers, and recipient denials recorded by the service. Debug output is operational telemetry. [OCSF API Activity schema](https://github.com/ocsf/ocsf-schema/blob/v1.7.0/events/application/api_activity.json)
 
 ```spl
-index=openshare_audit sourcetype=openshare:audit
+index=openshare_audit sourcetype=openshare:ocsf class_uid=6003
+| dedup metadata.uid
+| stats count by api.operation status_id
 ```
+
+OCSF events use UTC epoch milliseconds, an installation-scoped event ID, and request IDs where observed. A file transfer records use of a signed URL associated with a grant. The source IP is the service’s immediate peer, which may be the gateway. Previously mirrored legacy events keep their original sourcetype.
+
+## When to use OpenShare or MCP
+
+| Decision | OpenShare with OpenSharing | Splunk MCP Server |
+| --- | --- | --- |
+| Data access | Publish a reviewed snapshot with approved columns and a bounded search window. | Give an agent tools to ask new questions of Splunk within the access configured for those tools. |
+| What the client does | Discover a table and read files through an HTTPS gateway. | Discover and invoke MCP tools, such as search and saved-report tools where enabled. |
+| Security boundary | A scoped bearer profile grants access to one published table. Recipient reads run no SPL and require no Splunk account. | Access follows the server’s tool policy, authentication, and effective Splunk permissions. |
+| Use it for | External reporting, downstream analytics, or LLMs that should see only a specific published data product. | Interactive investigations where the agent needs to explore or run different searches. |
+
+Use OpenShare when the publisher needs to approve what leaves Splunk before it is shared. Use MCP when the workflow needs live tool calls into Splunk. They can work together. The LM Studio demo uses a narrowly scoped tool that reads the OpenSharing table. [Splunk MCP Server](https://help.splunk.com/en/splunk-enterprise/mcp-server-for-splunk-platform/2.1/about-splunk-mcp-server/about-mcp-server-for-splunk-platform) [OpenSharing table specification](https://github.com/OpenSharing-IO/OpenSharing/blob/main/spec/protocols/TABLES.md)
+
+## Security
+
+- **Publisher access.** Searches run as the signed-in publisher. Only the original publisher can refresh a share, including when an administrator can manage its grants. A preview expires after 30 minutes. Review the exact rows before publishing. Removing Splunk source access blocks future reads from that source, and existing shares need their own access review and revocation.
+- **Recipient access.** Use a separate expiring grant per recipient. Rotation preserves the original expiry. New requests fail after revocation. Previously issued signed links can work for up to five minutes, subject to the earlier grant expiry. Treat profiles and signed links as credentials and assume recipients can keep downloaded files.
+- **Network boundaries.** Expose only the recipient routes through HTTPS and disable authenticated caching. Keep the publishing listener private, use HTTPS with certificate verification between Splunk and the companion, and scope each companion and integration credential to one Splunk trust domain. Apply gateway request and concurrency limits appropriate to the deployment.
+- **Secrets and storage.** The companion stores recipient token verifiers. Provision the integration secret and a separate signing key through protected files. Use encrypted volumes, restricted OS permissions, and separate access and retention policies for snapshots, database backups, and audit files. The current app retains snapshot files and needs operator-managed storage and retention.
+- **Telemetry.** Keep recipient tokens, signed URLs, headers, and exported rows out of audit pipelines and proxy logs. Treat publisher names and peer IPs as operationally sensitive.
 
 ## Verify and troubleshoot
 
@@ -188,6 +220,8 @@ Build the versioned app archive and run the release checks:
 ```
 
 The build-tools container runs Ruff lint and formatting checks, Splunk Packaging Toolkit validation, and AppInspect in precert mode. The JSON report goes to `.lab/appinspect/report.json`. The lab installs the generated `.spl` with the Splunk CLI before the browser tests. Splunkbase publication requires its own submission and review. [Splunkbase release process](https://dev.splunk.com/enterprise/docs/releaseapps/splunkbase/)
+
+The archive builder also runs with Python 3.9 or later and no third-party packages. Run `python3 scripts/package.py` directly to build without Docker or GNU tar. AppInspect, the browser suite, and LM Studio are separate development or demo tools.
 
 The browser regression publishes an index and a report, checks permissions and the network guide, injects a billing event, verifies that refresh returns the changed count, and checks token rotation and revocation. It leaves screenshots in `.lab/test-artifacts/` and uses temporary profiles. For a manual refresh demo, add an event before clicking **Refresh** on the share:
 

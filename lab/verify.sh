@@ -15,6 +15,7 @@ docker compose --env-file .lab/env --profile test build recipient
 browser() {
     docker run --rm --network host --user "$(id -u):$(id -g)" \
         --env-file "$RECIPIENT_DIR/browser.env" -e "WEB_STAGE=$1" \
+        -e "WEB_BASE=http://127.0.0.1:${SPLUNK_WEB_PORT:-8000}" \
         -v "$RECIPIENT_DIR:/lab-output" \
         -v "$PWD/.lab/test-artifacts:/artifacts" openshare-lab-browser
 }

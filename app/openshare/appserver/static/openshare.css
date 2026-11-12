@@ -87,7 +87,7 @@
 #openshare .os-text-button { display: block; background: none; border: 0; padding: 0; margin-top: 3px; color: inherit; text-decoration: underline; }
 
 @media (max-width: 620px) {
-    #openshare { box-sizing: border-box; max-width: calc(100vw - 16px); padding-right: 14px; padding-left: 14px; }
+    #openshare { box-sizing: border-box; max-width: calc(100vw - 32px); padding-right: 14px; padding-left: 14px; }
     #openshare .os-nav { margin: 0 -14px; padding: 0 8px; }
     #openshare .os-nav button { padding: 0 9px; }
     #openshare .os-heading { align-items: flex-start; flex-wrap: wrap; }

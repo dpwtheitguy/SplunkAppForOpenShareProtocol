@@ -9,8 +9,8 @@ docker run --rm \
     -v "$PWD:/workspace:ro" \
     -v "$report_dir:/reports" \
     openshare-build-tools sh -ec '
-        ruff check --no-cache app service lab tests
-        ruff format --no-cache --check app service lab tests
+        ruff check --no-cache app service lab tests scripts
+        ruff format --no-cache --check app service lab tests scripts
         slim validate app/openshare
         splunk-appinspect inspect "$1" --mode precert \
             --output-file /reports/report.json --data-format json > /reports/appinspect.log

@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -10,7 +11,8 @@ import re
 import secrets
 import sqlite3
 import time
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -19,7 +21,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
+from ocsf import api_activity
 from starlette.background import BackgroundTask
+
+audit_request = ContextVar("audit_request", default=("", ""))
 
 
 def deployment_secret(name):
@@ -99,6 +104,18 @@ def initialize_database():
         }.items():
             if name not in columns:
                 conn.execute(f"ALTER TABLE snapshots ADD COLUMN {name} {definition}")
+        activity_columns = {row["name"] for row in conn.execute("PRAGMA table_info(activity)")}
+        for name in ("request_id", "source_ip"):
+            if name not in activity_columns:
+                conn.execute(f"ALTER TABLE activity ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            "INSERT OR IGNORE INTO settings VALUES ('audit_installation', ?)",
+            (secrets.token_hex(16),),
+        )
+        conn.execute(
+            """INSERT OR IGNORE INTO settings VALUES ('ocsf_cursor',
+               COALESCE((SELECT value FROM settings WHERE key='audit_cursor'), 0))"""
+        )
 
 
 def epoch():
@@ -113,8 +130,18 @@ def stamp(seconds):
 async def diagnostic_context(request, call_next):
     request_id = secrets.token_hex(8)
     started = time.monotonic()
-    response = await call_next(request)
+    source_ip = ""
+    if request.client:
+        with suppress(ValueError):
+            source_ip = str(ipaddress.ip_address(request.client.host))
+    context = audit_request.set((request_id, source_ip))
+    try:
+        response = await call_next(request)
+    finally:
+        audit_request.reset(context)
     response.headers["X-OpenShare-Request-ID"] = request_id
+    if request.url.path.startswith(prefix + "/"):
+        response.headers["Cache-Control"] = "private, no-store"
     with db() as conn:
         debug_until = conn.execute("SELECT value FROM settings WHERE key='debug_until'").fetchone()[
             0
@@ -132,33 +159,38 @@ async def diagnostic_context(request, call_next):
     return response
 
 
-def audit(conn, event, actor="", snapshot="", grant_id="", access=False):
+def audit(conn, event, actor="", snapshot="", grant_id="", access=False, context=None):
     if (
         access
         and not conn.execute("SELECT value FROM settings WHERE key='access_audit'").fetchone()[0]
     ):
         return
+    request_id, source_ip = audit_request.get() if context is None else context
     conn.execute(
-        "INSERT INTO activity VALUES (?,?,?,?,?)", (epoch(), event, actor, snapshot, grant_id)
+        """INSERT INTO activity (ts,event,actor,snapshot,grant_id,request_id,source_ip)
+           VALUES (?,?,?,?,?,?,?)""",
+        (epoch(), event, actor, snapshot, grant_id, request_id, source_ip),
     )
 
 
 def export_audit():
-    """Mirror committed events to Splunk's monitored lab volume."""
+    """Export committed events as OCSF JSONL for a local or remote collector."""
     with db() as conn:
+        installation = conn.execute(
+            "SELECT value FROM settings WHERE key='audit_installation'"
+        ).fetchone()[0]
         rows = conn.execute(
             """SELECT rowid AS event_id,* FROM activity
-               WHERE rowid > COALESCE((SELECT value FROM settings WHERE key='audit_cursor'), 0)
+               WHERE rowid > (SELECT value FROM settings WHERE key='ocsf_cursor')
                ORDER BY rowid LIMIT 200"""
         ).fetchall()
         for row in rows:
-            event = {**dict(row), "timestamp": stamp(row["ts"])}
-            date = event["timestamp"][:10]
-            with (audit_dir / f"openshare-{date}.jsonl").open("a", encoding="utf-8") as file:
-                file.write(json.dumps(event) + "\n")
+            date = stamp(row["ts"])[:10]
+            with (audit_dir / f"openshare-ocsf-{date}.jsonl").open("a", encoding="utf-8") as file:
+                file.write(json.dumps(api_activity(row, installation)) + "\n")
         if rows:
             conn.execute(
-                "INSERT OR REPLACE INTO settings VALUES ('audit_cursor', ?)",
+                "INSERT OR REPLACE INTO settings VALUES ('ocsf_cursor', ?)",
                 (rows[-1]["event_id"],),
             )
 
@@ -209,9 +241,9 @@ def manage_action(data):
         if action == "list":
             shares = conn.execute(
                 """SELECT id,owner,name,source,fields,rows,created,published,
-                          source_config IS NOT NULL AS can_refresh FROM snapshots
+                          (source_config IS NOT NULL AND owner=?) AS can_refresh FROM snapshots
                    WHERE published=1 AND (owner=? OR ?) ORDER BY created DESC""",
-                (actor, admin),
+                (actor, actor, admin),
             )
             grants = conn.execute(
                 """SELECT g.id,g.snapshot,g.label,g.expires,g.revoked,g.last_used,s.name
@@ -225,7 +257,9 @@ def manage_action(data):
                 (actor, admin),
             )
             settings = dict(
-                conn.execute("SELECT key,value FROM settings WHERE key!='audit_cursor'")
+                conn.execute(
+                    "SELECT key,value FROM settings WHERE key IN ('access_audit','debug_until')"
+                )
             )
             return {
                 "shares": [dict(row) for row in shares],
@@ -261,6 +295,8 @@ def manage_action(data):
             return stage(conn, data)
         row = owned(conn, snapshot, actor, admin)
         if action == "refresh_source":
+            if row["owner"] != actor:
+                raise HTTPException(403, "Only the original publisher can refresh this share")
             if not row["published"] or not row["source_config"]:
                 raise HTTPException(409, "This share has no refresh configuration")
             return {
@@ -270,8 +306,12 @@ def manage_action(data):
                 "base_version": row["version"],
             }
         if action == "publish":
+            if not row["published"] and epoch() - row["created"] >= 1800:
+                raise HTTPException(409, "The preview expired. Prepare a new snapshot.")
             if row["replacement_for"]:
                 original = owned(conn, row["replacement_for"], actor, admin)
+                if original["owner"] != actor:
+                    raise HTTPException(403, "Only the original publisher can refresh this share")
                 if not original["published"] or original["version"] != row["base_version"]:
                     raise HTTPException(409, "Share changed since preview. Prepare a new snapshot.")
                 conn.execute(
@@ -352,15 +392,21 @@ def change_grant(conn, action, row, data):
         ).fetchone()
         if not previous:
             raise HTTPException(404, "Active grant was not found")
+        if action == "rotate" and previous["expires"] <= epoch():
+            raise HTTPException(409, "Issue a new grant after expiration")
         conn.execute("UPDATE grants SET revoked=1 WHERE id=?", (previous["id"],))
         if action == "revoke":
             audit(conn, "grant_revoked", actor, snapshot, previous["id"])
             return {"ok": True}
     if not row["published"]:
         raise HTTPException(409, "Publish the snapshot before issuing access")
-    days = int(data.get("days", 7))
-    if not 1 <= days <= 30:
-        raise HTTPException(400, "Choose an expiration between 1 and 30 days")
+    if previous:
+        expires = previous["expires"]
+    else:
+        days = int(data.get("days", 7))
+        if not 1 <= days <= 30:
+            raise HTTPException(400, "Choose an expiration between 1 and 30 days")
+        expires = epoch() + days * 86400
     label = previous["label"] if previous else str(data.get("label", "")).strip()
     if not label or len(label) > 100:
         raise HTTPException(400, "Enter a recipient label of up to 100 characters")
@@ -368,7 +414,6 @@ def change_grant(conn, action, row, data):
     if not re.fullmatch(r"[a-f0-9]{64}", verifier):
         raise HTTPException(400, "Invalid verifier")
     grant = secrets.token_hex(16)
-    expires = epoch() + days * 86400
     conn.execute(
         "INSERT INTO grants VALUES (?,?,?,?,?,0,NULL)", (grant, snapshot, verifier, label, expires)
     )
@@ -376,39 +421,44 @@ def change_grant(conn, action, row, data):
     return {"endpoint": endpoint, "expirationTime": stamp(expires), "shareCredentialsVersion": 1}
 
 
-def authorized(request, share=None, schema=None, table=None):
+def authorize_grant(conn, request, share, schema, table):
     scheme, _, token = request.headers.get("authorization", "").partition(" ")
-    with db() as conn:
-        row = (
-            conn.execute(
-                """SELECT s.*,g.id AS grant_id,g.expires,g.revoked FROM grants g
-               JOIN snapshots s ON s.id=g.snapshot WHERE g.digest=?""",
-                (digest(token),),
-            ).fetchone()
-            if scheme.lower() == "bearer" and token
-            else None
+    row = (
+        conn.execute(
+            """SELECT s.*,g.id AS grant_id,g.expires,g.revoked FROM grants g
+           JOIN snapshots s ON s.id=g.snapshot WHERE g.digest=?""",
+            (digest(token),),
+        ).fetchone()
+        if scheme.lower() == "bearer" and token
+        else None
+    )
+    if not row or not row["published"] or row["revoked"] or row["expires"] <= epoch():
+        audit(
+            conn,
+            "recipient_denied",
+            snapshot=row["id"] if row else "",
+            grant_id=row["grant_id"] if row else "",
+            access=True,
         )
-        if not row or not row["published"] or row["revoked"] or row["expires"] <= epoch():
-            audit(
-                conn,
-                "recipient_denied",
-                snapshot=row["id"] if row else "",
-                grant_id=row["grant_id"] if row else "",
-                access=True,
-            )
-            result = 401
-        elif (
-            (share is not None and share != row["id"])
-            or (schema is not None and schema != "data")
-            or (table is not None and table != "snapshot")
-        ):
-            audit(
-                conn, "recipient_denied", snapshot=row["id"], grant_id=row["grant_id"], access=True
-            )
-            result = 404
-        else:
-            return row
-    raise HTTPException(result)
+        result = 401
+    elif (
+        (share is not None and share != row["id"])
+        or (schema is not None and schema != "data")
+        or (table is not None and table != "snapshot")
+    ):
+        audit(conn, "recipient_denied", snapshot=row["id"], grant_id=row["grant_id"], access=True)
+        result = 404
+    else:
+        return row, None
+    return None, result
+
+
+def authorized(request, share=None, schema=None, table=None):
+    with db() as conn:
+        row, denied = authorize_grant(conn, request, share, schema, table)
+    if denied:
+        raise HTTPException(denied)
+    return row
 
 
 @app.exception_handler(HTTPException)
@@ -505,22 +555,32 @@ def table_metadata(request: Request, share: str, schema: str, table: str):
 
 @app.post(table_path + "/query")
 async def query(request: Request, share: str, schema: str, table: str):
-    row = authorized(request, share, schema, table)
-    options = await request.json()
-    if (
-        options.get("version", row["version"]) != row["version"]
-        or options.get("timestamp")
-        or "startingVersion" in options
-    ):
-        raise HTTPException(400, "Only the latest snapshot is available")
-    expires = min(epoch() + 300, row["expires"])
-    grant = row["grant_id"]
-    file_id = row["active_file"] or share
-    url = f"{endpoint}/files/{file_id}/{grant}/{expires}/{sign(file_id, grant, expires)}"
-    file = root / f"{file_id}.parquet"
+    try:
+        options = await request.json()
+    except (ValueError, UnicodeError):
+        raise HTTPException(400, "Expected a JSON object") from None
+    if not isinstance(options, dict):
+        raise HTTPException(400, "Expected a JSON object")
     with db() as conn:
-        conn.execute("UPDATE grants SET last_used=? WHERE id=?", (epoch(), row["grant_id"]))
-        audit(conn, "snapshot_requested", snapshot=share, grant_id=row["grant_id"], access=True)
+        # Grant mutations take the same write lock. No URL is issued after revocation commits.
+        conn.execute("BEGIN IMMEDIATE")
+        row, denied = authorize_grant(conn, request, share, schema, table)
+        if row:
+            if (
+                options.get("version", row["version"]) != row["version"]
+                or options.get("timestamp")
+                or "startingVersion" in options
+            ):
+                raise HTTPException(400, "Only the latest snapshot is available")
+            expires = min(epoch() + 300, row["expires"])
+            grant = row["grant_id"]
+            file_id = row["active_file"] or share
+            url = f"{endpoint}/files/{file_id}/{grant}/{expires}/{sign(file_id, grant, expires)}"
+            file = root / f"{file_id}.parquet"
+            conn.execute("UPDATE grants SET last_used=? WHERE id=?", (epoch(), grant))
+            audit(conn, "snapshot_requested", snapshot=share, grant_id=grant, access=True)
+    if denied:
+        raise HTTPException(denied)
     return ndjson(
         metadata(row)
         + [
@@ -537,11 +597,18 @@ async def query(request: Request, share: str, schema: str, table: str):
     )
 
 
-def record_file(grant):
+def record_file(grant, context):
     with db() as conn:
         row = conn.execute("SELECT snapshot FROM grants WHERE id=?", (grant,)).fetchone()
         if row:
-            audit(conn, "file_served", snapshot=row["snapshot"], grant_id=grant, access=True)
+            audit(
+                conn,
+                "file_served",
+                snapshot=row["snapshot"],
+                grant_id=grant,
+                access=True,
+                context=context,
+            )
 
 
 @app.api_route(prefix + "/files/{snapshot}/{grant}/{expires}/{signature}", methods=["GET", "HEAD"])
@@ -552,7 +619,9 @@ def download(snapshot: str, grant: str, expires: int, signature: str, request: R
         or not hmac.compare_digest(signature, sign(snapshot, grant, expires))
     ):
         raise HTTPException(404)
-    event = BackgroundTask(record_file, grant) if request.method == "GET" else None
+    event = (
+        BackgroundTask(record_file, grant, audit_request.get()) if request.method == "GET" else None
+    )
     return FileResponse(
         root / f"{snapshot}.parquet",
         media_type="application/octet-stream",

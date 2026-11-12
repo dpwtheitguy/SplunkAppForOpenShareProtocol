@@ -1,6 +1,8 @@
 """Service behavior using a fresh SQLite database and Parquet volume per test."""
 
+import asyncio
 import hashlib
+import json
 import secrets
 import tempfile
 import unittest
@@ -107,15 +109,16 @@ class SharingTest(unittest.TestCase):
 
     def test_rotate_replaces_old_token_and_revocation_denies_new_token(self):
         share = self.publish()
-        self.issue(share)
+        original = self.issue(share)
         grant = self.act("list")["grants"][0]["id"]
-        self.act(
+        replacement = self.act(
             "rotate",
             snapshot=share,
             grant=grant,
             days=2,
             verifier=hashlib.sha256(b"replacement").hexdigest(),
         )
+        self.assertEqual(replacement["expirationTime"], original["expirationTime"])
         with self.assertRaises(HTTPException) as error:
             server.authorized(self.bearer())
         self.assertEqual(error.exception.status_code, 401)
@@ -165,3 +168,58 @@ class SharingTest(unittest.TestCase):
             server.download(share, "grant-b", expires, signature, request)
         with patch.object(server, "epoch", return_value=expires), self.assertRaises(HTTPException):
             server.download(share, "grant-a", expires, signature, request)
+
+    def test_admin_cannot_refresh_another_publishers_share(self):
+        share = self.publish()
+        self.assertEqual(self.act("list", actor="admin", admin=True)["shares"][0]["can_refresh"], 0)
+        with self.assertRaises(HTTPException) as error:
+            self.act("refresh_source", actor="admin", admin=True, snapshot=share)
+        self.assertEqual(error.exception.status_code, 403)
+
+    def test_staged_preview_expires(self):
+        share = self.stage()["id"]
+        with (
+            patch.object(server, "epoch", return_value=1_800_001_800),
+            self.assertRaises(HTTPException) as error,
+        ):
+            self.act("publish", snapshot=share)
+        self.assertEqual(error.exception.status_code, 409)
+
+    def test_ocsf_export_preserves_identity_and_omits_token_material(self):
+        share = self.publish()
+        self.issue(share)
+        with self.assertRaises(HTTPException):
+            server.authorized(self.bearer("unrecognized"), share)
+        with patch.object(server, "audit_dir", self.root):
+            server.export_audit()
+            server.export_audit()
+        export = next(self.root.glob("openshare-ocsf-*.jsonl"))
+        events = [json.loads(line) for line in export.read_text().splitlines()]
+        self.assertEqual(len(events), 3)
+        publish, grant, denial = events
+        self.assertEqual(publish["metadata"]["version"], "1.7.0")
+        self.assertEqual(publish["actor"]["user"]["name"], "alice")
+        self.assertEqual(publish["resources"][0]["uid"], share)
+        self.assertEqual(publish["time"], 1_800_000_000_000)
+        self.assertEqual(publish["type_uid"], 600301)
+        self.assertEqual(grant["api"]["operation"], "grant_issued")
+        self.assertEqual(denial["type_uid"], 600302)
+        self.assertEqual(denial["status_id"], 2)
+        self.assertEqual(denial["actor"]["user"], {"type_id": 0})
+        self.assertEqual(len({event["metadata"]["uid"] for event in events}), 3)
+        self.assertNotIn(self.sample_token, export.read_text())
+
+    def test_query_rechecks_revocation_after_reading_request_body(self):
+        share = self.publish()
+        self.issue(share)
+        grant = self.act("list")["grants"][0]["id"]
+        request = self.bearer()
+
+        async def read_body():
+            self.act("revoke", snapshot=share, grant=grant)
+            return {}
+
+        request.json = read_body
+        with self.assertRaises(HTTPException) as error:
+            asyncio.run(server.query(request, share, "data", "snapshot"))
+        self.assertEqual(error.exception.status_code, 401)
