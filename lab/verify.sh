@@ -8,8 +8,8 @@ trap 'rm -rf -- "$RECIPIENT_DIR"' EXIT
 mkdir -p .lab/test-artifacts
 grep '^PUBLISHER_PASSWORD=' .lab/env > "$RECIPIENT_DIR/browser.env"
 docker compose --env-file .lab/env exec -T --user splunk splunk /opt/splunk/bin/splunk cmd python < lab/seed.py
-{ sed '/^if __name__/,$d' lab/seed.py; cat lab/check.py; } |
-    docker compose --env-file .lab/env exec -T --user splunk splunk /opt/splunk/bin/splunk cmd python
+docker compose --env-file .lab/env exec -T --user splunk splunk \
+    /opt/splunk/bin/splunk cmd python /mnt/openshare-lab/check.py
 docker build -t openshare-lab-browser -f lab/WebCheck.Dockerfile lab
 docker compose --env-file .lab/env --profile test build recipient
 browser() {

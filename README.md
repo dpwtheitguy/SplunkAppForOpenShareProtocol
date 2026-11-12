@@ -2,6 +2,10 @@
 
 Publish a read-only table from a Splunk Enterprise index or saved report. Choose the fields and time window in Splunk Web, preview the snapshot, and issue an expiring OpenSharing profile. Recipients read the published data over HTTPS with a standard client. They need only the profile and access to the OpenShare gateway.
 
+**[Download OpenShare 0.2.0 (.spl)](https://raw.githubusercontent.com/dpwtheitguy/SplunkAppForOpenShareProtocol/main/packages/openshare-0.2.0.spl)** · [SHA-256 checksum](packages/openshare-0.2.0.spl.sha256) · [Install on Splunk Enterprise](#install-on-splunk-enterprise) · [Run the Docker lab](#run-the-docker-lab)
+
+Tested on standalone Splunk Enterprise 10.6.1 on Linux. The Splunk package provides the publisher UI and requires a separately deployed OpenShare companion service. Splunk Cloud Platform has not been validated.
+
 ## See it work
 
 **Publish from Splunk Web.** The publisher reviews the exact columns and a sample of the snapshot before making it available.
@@ -14,7 +18,54 @@ Publish a read-only table from a Splunk Enterprise index or saved report. Choose
 
 The demo uses synthetic billing and identity events. The recipient container has its own network on the same machine and reaches the lab only through the sharing gateway.
 
-## Quick start
+## Install on Splunk Enterprise
+
+### 1. Deploy the companion service
+
+Use the companion source from the same revision as the app. The companion stores grant state and Parquet snapshots in `/data`. Provision a persistent volume and two separate random secrets of at least 32 characters. Use the same integration key on the Splunk and companion hosts. Keep the file-signing key on the companion host.
+
+```bash
+docker build -t openshare-companion:0.2.0 ./service
+docker volume create openshare-data
+docker run -d --name openshare-companion --restart unless-stopped \
+  -p 127.0.0.1:9000:9000 \
+  -e ENDPOINT=https://share.example.com/open-sharing \
+  -e OPENSHARE_KEY_FILE=/run/secrets/integration-key \
+  -e FILE_KEY_FILE=/run/secrets/file-signing-key \
+  --mount type=bind,source=/path/to/integration-key,target=/run/secrets/integration-key,readonly \
+  --mount type=bind,source=/path/to/file-signing-key,target=/run/secrets/file-signing-key,readonly \
+  --mount type=volume,source=openshare-data,target=/data \
+  openshare-companion:0.2.0
+```
+
+Replace the hostname and secret paths with your deployment values. Terminate TLS at a gateway on the companion host. Route the published hostname’s OpenSharing discovery, table, and signed file routes to the loopback service. Use [the lab’s NGINX route rules](lab/nginx.conf) as a starting point and replace the lab hostname, port, certificate paths, and upstream address. Route `POST /private/manage` on a separate private HTTPS listener reachable only by Splunk. Use the configured hostname in the TLS certificate and exclude authorization headers and signed URLs from gateway logs.
+
+### 2. Install and configure the Splunk app
+
+With the archive and checksum in the same directory, run `sha256sum -c openshare-0.2.0.spl.sha256` before uploading.
+
+1. In Splunk Web, go to **Apps → Manage Apps → Install app from file** and upload the versioned `.spl`. For an existing `openshare` install, choose **Upgrade app**.
+2. On the Splunk host, create `$SPLUNK_HOME/etc/apps/openshare/local/openshare.conf` using the example below. The integration key file must be readable by the Splunk OS account and protected from other users. Use the private gateway URL without the `/private/manage` suffix.
+3. Restart Splunk if prompted. Assign the `openshare_publish` capability to a Splunk search role that can read the intended indexes or saved reports. Open **OpenShare for Splunk Enterprise** from the app menu.
+
+```ini
+[companion]
+url = https://openshare-private.example.com
+key_file = /path/to/integration-key
+ca_file = /path/to/private-ca.pem
+```
+
+Omit `ca_file` when the private certificate chains to the host’s trusted CA store. The app validates HTTPS certificates and hostnames. If it cannot load, check the private listener, CA trust, and the integration key file’s permissions. The lab’s HTTP override lives in its local configuration and is for the isolated Docker network.
+
+### 3. Publish and consume
+
+1. In **Shares**, select **Create share** and choose an index or saved report available to your role. Set the time window, select the columns, and review the preview before publishing.
+2. Send the **Network guide** to your network engineer. Generate an expiring profile for the recipient and hand it off as a credential.
+3. The recipient uses the profile with an OpenSharing client. See the Python example below. Use **Activity** to review reads, **Refresh** to publish updated results, and **Access Tokens** to rotate or revoke credentials.
+
+For a Splunk audit index, mount or forward the companion’s optional audit export. The companion writes JSONL to `AUDIT_EXPORT_DIR` when that directory exists. Use the [lab monitor configuration](lab/splunk/inputs.conf) as a template and restrict access to the `openshare_audit` index. The Activity screen reads the companion’s audit state directly.
+
+## Run the Docker lab
 
 ### 1. Start the lab
 
@@ -67,7 +118,15 @@ print(delta_sharing.load_as_pandas(table_url).to_string(index=False))
 
 ### 4. Ask an LLM and test revocation
 
-Paste the returned table into LM Studio Chat with this prompt:
+For a live question, load a tool-capable model in LM Studio and start its local server from the **Developer** tab on port 1234. With the profile saved at `.lab/recipient/profile.share`, run:
+
+```bash
+python3 lab/ask.py "Which service had the most errors, and how many?"
+```
+
+The default model ID is `gpt-oss-20b`. Pass `--model` to select another loaded model or `--profile-dir` for a different directory containing `profile.share`. If the local API requires authentication, set `LM_API_TOKEN` in your environment. The model calls `read_shared_snapshot` and the isolated client reads the latest authorized snapshot on each question. The demo accepts up to 100 rows and 10 KB of serialized data. [LM Studio local server](https://lmstudio.ai/docs/developer/core/server) [LM Studio tool calling](https://lmstudio.ai/docs/developer/openai-compat/tools)
+
+You can also paste the returned table into LM Studio Chat:
 
 > Which service had the most errors? Give the count and one limitation of the snapshot.
 
@@ -121,6 +180,15 @@ index=openshare_audit sourcetype=openshare:audit
 ./lab/verify.sh
 ```
 
+Build the versioned app archive and run the release checks:
+
+```bash
+./scripts/package.sh
+./scripts/check-package.sh
+```
+
+The build-tools container runs Ruff lint and formatting checks, Splunk Packaging Toolkit validation, and AppInspect in precert mode. The JSON report goes to `.lab/appinspect/report.json`. The lab installs the generated `.spl` with the Splunk CLI before the browser tests. Splunkbase publication requires its own submission and review. [Splunkbase release process](https://dev.splunk.com/enterprise/docs/releaseapps/splunkbase/)
+
 The browser regression publishes an index and a report, checks permissions and the network guide, injects a billing event, verifies that refresh returns the changed count, and checks token rotation and revocation. It leaves screenshots in `.lab/test-artifacts/` and uses temporary profiles. For a manual refresh demo, add an event before clicking **Refresh** on the share:
 
 ```bash
@@ -145,4 +213,4 @@ docker compose --env-file .lab/env down
 
 OpenShare serves scalar string columns and one active snapshot per share. A refresh preserves active recipient grants. The lab uses a local CA, a deployment-mounted integration secret, and persistent local snapshot storage. A production deployment still needs private-link TLS, managed secrets, role and audit retention configuration, and automated snapshot retention.
 
-The Splunk app is under [`app/openshare/`](app/openshare/), the OpenSharing provider is in [`service/`](service/), and the Docker lab and browser tests are in [`lab/`](lab/). See the [MVP PRD](PRD.md) for the design and acceptance criteria.
+The Splunk app is under [`app/openshare/`](app/openshare/), the OpenSharing provider is in [`service/`](service/), and the Docker lab and browser tests are in [`lab/`](lab/). See the [MVP PRD](PRD.md) for the design and acceptance criteria or [GitHub Issues](https://github.com/dpwtheitguy/SplunkAppForOpenShareProtocol/issues) for support.

@@ -11,7 +11,7 @@ services:
     volumes:
       - splunk-var:/opt/splunk/var
       - splunk-etc:/opt/splunk/etc
-      - ./app/openshare:/mnt/openshare-app:ro
+      - ./lab:/mnt/openshare-lab:ro
       - ./.lab/app-key:/run/openshare/app-key:ro
       - audit:/var/lib/openshare-audit:ro
     networks: [private]

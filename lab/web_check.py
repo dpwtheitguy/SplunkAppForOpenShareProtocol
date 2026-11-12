@@ -1,4 +1,5 @@
 """Exercise the publisher workflow through the installed Splunk UI."""
+
 import os
 import time
 from pathlib import Path
@@ -15,7 +16,9 @@ with sync_playwright() as playwright:
     page.goto(base + "/en-US/account/login")
     admin = stage.startswith("logging")
     page.locator('input[name="username"]').fill("admin" if admin else "openshare_publisher")
-    page.locator('input[name="password"]').fill(os.environ["SPLUNK_PASSWORD" if admin else "PUBLISHER_PASSWORD"])
+    page.locator('input[name="password"]').fill(
+        os.environ["SPLUNK_PASSWORD" if admin else "PUBLISHER_PASSWORD"]
+    )
     page.locator('input[name="password"]').press("Enter")
     page.wait_for_url(lambda url: "/account/login" not in url)
     page.goto(base + "/en-US/app/openshare/openshare")
@@ -34,19 +37,29 @@ with sync_playwright() as playwright:
         expect(page.get_by_text("Logging settings saved.")).to_be_visible()
         print("Changed both logging toggles through Splunk Web.")
     elif stage in {"publish", "index"}:
-        expect(page.locator("#openshare").get_by_role("button", name="Logging", exact=True)).to_have_count(0)
+        expect(
+            page.locator("#openshare").get_by_role("button", name="Logging", exact=True)
+        ).to_have_count(0)
         is_index = stage == "index"
         name = ("Browser index " if is_index else "Browser report ") + str(int(time.time()))
         page.get_by_role("button", name="Create share").click()
         page.get_by_label("Source type").select_option("index" if is_index else "report")
         page.get_by_label("Source", exact=True).select_option(
-            label="openshare_lab" if is_index else "OpenShare Lab Errors by Service (openshare / admin)"
+            label="openshare_lab"
+            if is_index
+            else "OpenShare Lab Errors by Service (openshare / admin)"
         )
         page.get_by_label("Share name").fill(name)
-        page.get_by_label("Fields (comma-separated)").fill("source, sourcetype" if is_index else "service, error_count")
+        page.get_by_label("Fields (comma-separated)").fill(
+            "source, sourcetype" if is_index else "service, error_count"
+        )
         page.get_by_role("button", name="Preview snapshot").click()
         expect(page.get_by_role("heading", name="Review snapshot")).to_be_visible(timeout=30000)
-        expect(page.get_by_role("cell", name="openshare_lab" if is_index else "billing", exact=True).first).to_be_visible()
+        expect(
+            page.get_by_role(
+                "cell", name="openshare_lab" if is_index else "billing", exact=True
+            ).first
+        ).to_be_visible()
         expect(page.get_by_text("demo_sensitive", exact=False)).to_have_count(0)
         page.get_by_label("Share name").fill(name + " changed")
         expect(page.get_by_role("button", name="Publish snapshot")).to_have_count(0)
@@ -54,12 +67,20 @@ with sync_playwright() as playwright:
         page.get_by_role("button", name="Preview snapshot").click()
         page.get_by_role("button", name="Publish snapshot").click()
         guide = page.locator(".os-network-guide")
-        expect(guide.get_by_role("heading", name="Firewall and load balancer guide")).to_be_visible()
+        expect(
+            guide.get_by_role("heading", name="Firewall and load balancer guide")
+        ).to_be_visible()
         expect(guide.get_by_text("https://share.lab:8443/open-sharing", exact=True)).to_be_visible()
         expect(guide.get_by_text("HTTP 401", exact=False)).to_be_visible()
         guide.get_by_text("Allowed methods and paths", exact=True).click()
         expect(guide.get_by_role("cell", name="/open-sharing/shares", exact=True)).to_be_visible()
-        expect(guide.get_by_role("cell", name="/open-sharing/files/{snapshot}/{grant}/{expiry}/{signature}", exact=True)).to_be_visible()
+        expect(
+            guide.get_by_role(
+                "cell",
+                name="/open-sharing/files/{snapshot}/{grant}/{expiry}/{signature}",
+                exact=True,
+            )
+        ).to_be_visible()
         page.context.grant_permissions(["clipboard-read", "clipboard-write"], origin=base)
         guide.get_by_role("button", name="Copy network guide").click()
         expect(page.get_by_text("Network guide copied.", exact=True)).to_be_visible()
@@ -82,8 +103,11 @@ with sync_playwright() as playwright:
         download.value.save_as(output / "profile.share")
         (output / "profile.share").chmod(0o600)
         (output / "browser-share-name").write_text(name)
-        print("Published an index and downloaded its profile through Splunk Web." if is_index
-              else "Published a report and downloaded its profile through Splunk Web.")
+        print(
+            "Published an index and downloaded its profile through Splunk Web."
+            if is_index
+            else "Published a report and downloaded its profile through Splunk Web."
+        )
     elif stage == "refresh":
         name = (output / "browser-share-name").read_text()
         page.get_by_role("row").filter(has_text=name).get_by_role("button", name="Refresh").click()
@@ -100,7 +124,9 @@ with sync_playwright() as playwright:
             row.get_by_role("button", name="Rotate").click()
         download.value.save_as(output / "rotated.share")
         (output / "rotated.share").chmod(0o600)
-        expect(page.get_by_role("row").filter(has_text=name).filter(has_text="Revoked")).to_have_count(1)
+        expect(
+            page.get_by_role("row").filter(has_text=name).filter(has_text="Revoked")
+        ).to_have_count(1)
         print("Rotated the profile through Splunk Web.")
     elif stage == "layout":
         page.locator("#openshare").screenshot(path="/artifacts/openshare-shares.png")
@@ -123,10 +149,14 @@ with sync_playwright() as playwright:
         page.locator("#openshare").get_by_role("button", name="Activity", exact=True).click()
         page.get_by_label("Share", exact=True).select_option(label=name)
         page.get_by_label("Event type", exact=True).select_option("file_served")
-        expect(page.get_by_role("row").filter(has_text=name).filter(has_text="file served").first).to_be_visible()
+        expect(
+            page.get_by_role("row").filter(has_text=name).filter(has_text="file served").first
+        ).to_be_visible()
         page.get_by_role("button", name="Access Tokens", exact=True).click()
         page.once("dialog", lambda dialog: dialog.accept())
         row = page.get_by_role("row").filter(has_text=name).filter(has_text="Active")
         row.get_by_role("button", name="Revoke").click()
-        expect(page.get_by_role("row").filter(has_text=name).filter(has_text="Revoked")).to_have_count(2)
+        expect(
+            page.get_by_role("row").filter(has_text=name).filter(has_text="Revoked")
+        ).to_have_count(2)
         print("Observed download activity and revoked the profile in Splunk Web.")

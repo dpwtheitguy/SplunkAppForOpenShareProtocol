@@ -17,7 +17,9 @@ for host in ("splunk", "sharing"):
     except socket.gaierror:
         continue
     raise AssertionError(f"Private host {host} resolved on the recipient network")
-assert requests.get(f"{origin.scheme}://{origin.netloc}/private/manage", timeout=5).status_code == 404
+assert (
+    requests.get(f"{origin.scheme}://{origin.netloc}/private/manage", timeout=5).status_code == 404
+)
 assert requests.delete(endpoint + "/shares", timeout=5).status_code == 405
 headers = {"Authorization": "Bearer " + credentials["bearerToken"]}
 discovery = requests.get(endpoint + "/shares", headers=headers, timeout=5)
@@ -30,9 +32,7 @@ client = delta_sharing.SharingClient(profile)
 tables = client.list_all_tables()
 assert len(tables) == 1, tables
 table = tables[0]
-frame = delta_sharing.load_as_pandas(
-    f"{profile}#{table.share}.{table.schema}.{table.name}"
-)
+frame = delta_sharing.load_as_pandas(f"{profile}#{table.share}.{table.schema}.{table.name}")
 print(frame.to_string(index=False))
 if os.getenv("EXPECT_INDEX"):
     assert list(frame.columns) == ["source", "sourcetype"]

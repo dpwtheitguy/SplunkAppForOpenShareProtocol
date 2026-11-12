@@ -1,0 +1,15 @@
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP", "SIM", "C4", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# These assertions check lab acceptance criteria and unit-test behavior.
+"lab/check.py" = ["S101"]
+"lab/consume.py" = ["S101"]
+"lab/web_check.py" = ["S101"]
+"tests/*.py" = ["S101"]
+# The command is a fixed Docker Compose invocation. The model provides no arguments.
+"lab/ask.py" = ["S603"]

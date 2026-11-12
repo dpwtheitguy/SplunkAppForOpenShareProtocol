@@ -1,7 +1,15 @@
-"""Run after the declarations in seed.py inside Splunk."""
+"""Check the limited publisher's permissions inside the lab Splunk instance."""
+
+import json
+import os
+
+from seed import login, request
+
+
 def manage(token, action, **kwargs):
-    return request("/services/openshare/manage",
-                   {"request": json.dumps({"action": action, **kwargs})}, token)
+    return request(
+        "/services/openshare/manage", {"request": json.dumps({"action": action, **kwargs})}, token
+    )
 
 
 def check():
@@ -14,9 +22,17 @@ def check():
         ("report", "OpenShare Lab Restricted Report"),
     ):
         try:
-            restricted = manage(token, "stage", sourceType=source_type, source=source,
-                                app="openshare", reportOwner="admin", window="24h",
-                                name="Restricted check", fields=["service"])
+            restricted = manage(
+                token,
+                "stage",
+                sourceType=source_type,
+                source=source,
+                app="openshare",
+                reportOwner="admin",
+                window="24h",
+                name="Restricted check",
+                fields=["service"],
+            )
         except RuntimeError as error:
             assert ": 403 " in str(error), error
         else:
@@ -31,4 +47,5 @@ def check():
     print("Publisher permission checks passed.")
 
 
-check()
+if __name__ == "__main__":
+    check()

@@ -1,7 +1,9 @@
 require(["jquery", "splunkjs/mvc/simplexml/ready!"], function ($) {
     "use strict";
     const root = document.getElementById("openshare");
-    const endpoint = "/en-US/splunkd/__raw/services/openshare/manage";
+    const appRoute = window.location.pathname.lastIndexOf("/app/");
+    const webPrefix = appRoute < 0 ? "" : window.location.pathname.slice(0, appRoute);
+    const endpoint = webPrefix + "/splunkd/__raw/services/openshare/manage";
     let view = "Shares";
 
     function node(tag, content, parent) {

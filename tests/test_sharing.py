@@ -1,19 +1,21 @@
 """Service behavior using a fresh SQLite database and Parquet volume per test."""
+
 import hashlib
+import secrets
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import pyarrow.parquet as parquet
+import server
 from fastapi import HTTPException
 from starlette.requests import Request
-
-import server
 
 
 class SharingTest(unittest.TestCase):
     def setUp(self):
+        self.sample_token = secrets.token_urlsafe(32)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
@@ -25,26 +27,37 @@ class SharingTest(unittest.TestCase):
         return server.manage_action({"action": action, "actor": actor, "admin": admin, **values})
 
     def stage(self, **overrides):
-        return self.act("stage", **{
-            "name": "Incident review",
-            "source": "lab_events",
-            "sourceType": "index",
-            "fields": ["service", "error_count"],
-            "rows": [{"service": "billing", "error_count": "3", "secret": "omit"}],
-            **overrides,
-        })
+        return self.act(
+            "stage",
+            **{
+                "name": "Incident review",
+                "source": "lab_events",
+                "sourceType": "index",
+                "fields": ["service", "error_count"],
+                "rows": [{"service": "billing", "error_count": "3", "secret": "omit"}],
+                **overrides,
+            },
+        )
 
     def publish(self):
         share = self.stage()["id"]
         self.act("publish", snapshot=share)
         return share
 
-    def issue(self, share, token="sample-test-token"):
-        return self.act("issue", snapshot=share, label="On-call", days=1,
-                        verifier=hashlib.sha256(token.encode()).hexdigest())
+    def issue(self, share):
+        return self.act(
+            "issue",
+            snapshot=share,
+            label="On-call",
+            days=1,
+            verifier=hashlib.sha256(self.sample_token.encode()).hexdigest(),
+        )
 
-    def bearer(self, token="sample-test-token"):
-        return Request({"type": "http", "headers": [(b"authorization", ("Bearer " + token).encode())]})
+    def bearer(self, token=None):
+        token = self.sample_token if token is None else token
+        return Request(
+            {"type": "http", "headers": [(b"authorization", ("Bearer " + token).encode())]}
+        )
 
     def test_parquet_contains_only_approved_columns(self):
         draft = self.stage()
@@ -85,17 +98,24 @@ class SharingTest(unittest.TestCase):
     def test_expired_grant_is_denied(self):
         share = self.publish()
         self.issue(share)
-        with patch.object(server, "epoch", return_value=1_800_086_400):
-            with self.assertRaises(HTTPException) as error:
-                server.authorized(self.bearer(), share)
+        with (
+            patch.object(server, "epoch", return_value=1_800_086_400),
+            self.assertRaises(HTTPException) as error,
+        ):
+            server.authorized(self.bearer(), share)
         self.assertEqual(error.exception.status_code, 401)
 
     def test_rotate_replaces_old_token_and_revocation_denies_new_token(self):
         share = self.publish()
         self.issue(share)
         grant = self.act("list")["grants"][0]["id"]
-        self.act("rotate", snapshot=share, grant=grant, days=2,
-                 verifier=hashlib.sha256(b"replacement").hexdigest())
+        self.act(
+            "rotate",
+            snapshot=share,
+            grant=grant,
+            days=2,
+            verifier=hashlib.sha256(b"replacement").hexdigest(),
+        )
         with self.assertRaises(HTTPException) as error:
             server.authorized(self.bearer())
         self.assertEqual(error.exception.status_code, 401)
@@ -138,9 +158,10 @@ class SharingTest(unittest.TestCase):
         expires = 1_800_000_300
         signature = server.sign(share, "grant-a", expires)
         request = Request({"type": "http", "method": "HEAD"})
-        self.assertEqual(server.download(share, "grant-a", expires, signature, request).status_code, 200)
+        self.assertEqual(
+            server.download(share, "grant-a", expires, signature, request).status_code, 200
+        )
         with self.assertRaises(HTTPException):
             server.download(share, "grant-b", expires, signature, request)
-        with patch.object(server, "epoch", return_value=expires):
-            with self.assertRaises(HTTPException):
-                server.download(share, "grant-a", expires, signature, request)
+        with patch.object(server, "epoch", return_value=expires), self.assertRaises(HTTPException):
+            server.download(share, "grant-a", expires, signature, request)
