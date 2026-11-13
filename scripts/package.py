@@ -58,9 +58,10 @@ def build(output):
             gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed,
             tarfile.open(fileobj=compressed, mode="w") as tar,
         ):
-            for path in app_files():
+            for path in (*app_files(), ROOT / "LICENSE", ROOT / "NOTICE"):
                 data = path.read_bytes()
-                member = tarfile.TarInfo(path.relative_to(APP.parent).as_posix())
+                name_in_app = path.relative_to(APP) if path.is_relative_to(APP) else Path(path.name)
+                member = tarfile.TarInfo((Path(APP.name) / name_in_app).as_posix())
                 member.size = len(data)
                 member.mode = 0o644
                 tar.addfile(member, io.BytesIO(data))
