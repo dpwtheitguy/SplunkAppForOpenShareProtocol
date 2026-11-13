@@ -205,7 +205,7 @@ Use OpenShare when the publisher needs to approve what leaves Splunk before it i
 - **Secrets and storage.** The companion stores recipient token verifiers. Provision the integration secret and a separate signing key through protected files. Use encrypted volumes, restricted OS permissions, and separate access and retention policies for snapshots, database backups, and audit files. The current app retains snapshot files and needs operator-managed storage and retention.
 - **Telemetry.** Keep recipient tokens, signed URLs, headers, and exported rows out of audit pipelines and proxy logs. Treat publisher names and peer IPs as operationally sensitive.
 
-## Verify and troubleshoot
+## Verify the build
 
 ```bash
 ./lab/test-unit.sh
@@ -230,18 +230,60 @@ docker compose --env-file .lab/env exec -T --user splunk splunk \
   /opt/splunk/bin/splunk cmd python - --append-billing < lab/seed.py
 ```
 
-| Symptom | Check |
-| --- | --- |
-| Splunk Web is still starting | Run `docker compose --env-file .lab/env ps` and wait for Splunk to report healthy. |
-| Recipient receives HTTP 401 | Confirm the profile is current and the share is enabled. Issue a fresh profile after rotation or revocation. |
-| TLS or name resolution fails | Use the Compose recipient runner, which mounts the lab CA and resolves `share.lab` on the recipient network. |
-| Demo reports are empty | Rerun `./lab/up.sh` to seed fresh synthetic events and use a time window that includes them. |
-
 Stop the lab while retaining its Docker volumes:
 
 ```bash
 docker compose --env-file .lab/env down
 ```
+
+## Troubleshooting
+
+Start at the boundary where the failure occurs. If the publisher cannot load the app, check Splunk’s connection to the **private companion listener**. If a recipient cannot read, test the **recipient HTTPS gateway** from the recipient’s network. If a read succeeds but no audit events appear in Splunk Search, check the optional audit export and ingestion path.
+
+### App loading and publishing
+
+| Symptom | What to check |
+| --- | --- |
+| App fails to load or says to configure the companion | On the Splunk host, check `$SPLUNK_HOME/etc/apps/openshare/local/openshare.conf`. Use the private listener base URL in `url`. The app appends `/private/manage`. Verify the Splunk OS account can read `key_file` and, if configured, `ca_file`. Confirm the private listener is reachable and its certificate matches the hostname. |
+| Publisher request returns HTTP 401 or 403 | Sign back in if your Splunk session expired. Check the publisher has `openshare_publish` and access to the source. If the companion returns 401 for the private management request, confirm both sides use the same integration key. Only the original publisher can refresh a share. |
+| Source is missing, or the preview has no rows | Run the report or index search in Splunk Web as the same publisher with the same time window. Check the report’s app and owner, the role’s index restrictions, and whether the source contains recent data. For the Docker lab, run `./lab/up.sh` to reseed synthetic data if needed. |
+| Preview fails with a search or size error | Check **Activity → Jobs** in Splunk Web for search errors. Use a narrower time window, select fewer fields, or aggregate in a saved report. The MVP accepts up to 50,000 rows and 100 MB of serialized results. Convert multivalue results to scalar fields in the report and use reports that can run without input tokens. |
+| Publish says the preview expired or refresh says the share changed | Generate a fresh preview and review it before publishing. Previews expire after 30 minutes, and a refresh prepared against an older version must be prepared again. |
+| Recipient sees older data | Check the share’s snapshot timestamp in **Shares**. Have the original publisher preview and publish a refresh, then have the recipient fetch again using the same active profile. |
+
+### Recipient connectivity and access
+
+From the recipient network, probe discovery with no profile. Replace the example hostname with the endpoint in **Network guide**.
+
+```bash
+curl -sS -o /dev/null -w 'HTTP %{http_code}\n' https://share.example.com/open-sharing/shares
+```
+
+**HTTP 401 is expected for this probe.** It confirms the HTTPS request reached an authentication boundary. Run a real OpenSharing client with a valid profile to verify discovery and file delivery. For the Docker lab, use the Compose recipient runner, which resolves `share.lab` and trusts the lab CA.
+
+| Symptom | What to check |
+| --- | --- |
+| DNS failure, timeout, or connection refused | Check the recipient hostname and TCP port against the handoff. Confirm DNS from the recipient network, firewall rules, and the gateway listener. |
+| Certificate verification fails | Check the hostname, certificate validity, and certificate chain. Configure the approved CA bundle on the recipient. For a manual curl probe with a private CA, add `--cacert /path/to/ca.pem`. |
+| Client with a profile receives 401 | Confirm the profile is current, the share is enabled, and the grant has not expired or been revoked. If a token was rotated, use its replacement profile. Confirm the gateway forwards the Authorization header to the sharing API. |
+| API or download returns 404 or 405 | Compare the client’s method and route with **Network guide**. A 404 can also mean the requested table is outside the grant or the signed download URL expired. Requery the table with a valid profile to get fresh links. |
+| Discovery works but the Parquet read fails | Check that the recipient can reach the hostname in the file URL, that the gateway routes the signed file path, and that it passes byte-range requests. Check the companion’s persistent volume and available space if the problem persists. |
+| Gateway returns 429 or 502/503/504 | For 429, reduce request concurrency and retry with backoff. For 5xx gateway errors, check companion health, upstream address, and gateway timeouts before retrying. |
+
+### Audit, diagnostics, and support
+
+- **Activity shows events but Splunk Search is empty.** Check that the companion’s `AUDIT_EXPORT_DIR` exists and is writable, that the collector can read the files, and that the monitor targets `openshare_audit` with sourcetype `openshare:ocsf`. Search with a time range covering the test. Look for `audit_mirror_failed` in the companion logs.
+- **Share changes appear but recipient reads are missing.** As an app administrator, check **Logging → Record recipient access audit**. When disabled, share and grant changes still appear.
+- **The Docker lab is unavailable.** From the project directory, check service status and recent logs:
+
+  ```bash
+  docker compose --env-file .lab/env ps
+  docker compose --env-file .lab/env logs --tail=100 splunk sharing gateway
+  ```
+
+  On an existing Enterprise install, inspect `$SPLUNK_HOME/var/log/splunk/splunkd.log` and the companion and gateway logs. Use **Verbose diagnostics** temporarily when you need request timing and status. Correlate with `X-OpenShare-Request-ID` where available.
+- **The LM Studio demo fails.** Run the recipient connector by itself first. Then confirm LM Studio is listening on `127.0.0.1:1234`, a tool-capable model is loaded, and the selected profile directory contains an active `profile.share`. Use `--model` if the loaded model ID differs from the default. The demo expects up to 100 rows and 10 KB of serialized data.
+- **Open a support issue.** Include the app and Splunk versions, the failing step, HTTP status, request ID if available, and redacted log excerpts. Remove recipient profiles, tokens, signing keys, signed URLs, and exported rows before posting. [GitHub Issues](https://github.com/dpwtheitguy/SplunkAppForOpenShareProtocol/issues)
 
 ## MVP scope
 
