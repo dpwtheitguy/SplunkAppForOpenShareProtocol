@@ -291,6 +291,19 @@ OpenShare serves scalar string columns and one active snapshot per share. A refr
 
 The Splunk app is under [`app/openshare/`](app/openshare/), the OpenSharing provider is in [`service/`](service/), and the Docker lab and browser tests are in [`lab/`](lab/). See the [MVP PRD](PRD.md) for the design and acceptance criteria or [GitHub Issues](https://github.com/dpwtheitguy/SplunkAppForOpenShareProtocol/issues) for support.
 
+## Version history
+
+Add an entry here whenever a new `.spl` is published. Record the release date, link the package and its SHA-256 checksum, and summarize changes that affect installation, compatibility, or use. Track documentation changes made between package releases in a separate note.
+
+| Version | Date | Changes | Downloads |
+| --- | --- | --- | --- |
+| **0.3.2** | 2026-11-12 | Adopted Apache 2.0 and included the license and attribution notice in the Splunk package. | [.spl](packages/openshare-0.3.2.spl) · [SHA-256](packages/openshare-0.3.2.spl.sha256) |
+| 0.3.1 | 2026-11-12 | Enabled update checks for Splunkbase submission. Added a build check that rejects packages with update checks disabled. | [.spl](packages/openshare-0.3.1.spl) · [SHA-256](packages/openshare-0.3.1.spl.sha256) |
+| 0.3.0 | 2026-11-12 | Added OCSF 1.7.0 audit export, hardened refresh and revocation, and preserved grant expiry during token rotation. Validated standalone Splunk Enterprise 9.4.16 and 10.6.1. | [.spl](packages/openshare-0.3.0.spl) · [SHA-256](packages/openshare-0.3.0.spl.sha256) |
+| 0.2.0 | 2026-11-12 | First downloadable package. Added configurable companion settings, Splunk CLI installation in the lab, and repeatable Ruff and AppInspect validation. | [.spl](packages/openshare-0.2.0.spl) · [SHA-256](packages/openshare-0.2.0.spl.sha256) |
+
+**Documentation after 0.3.2.** Expanded [troubleshooting](#troubleshooting) for publisher permissions, gateway and recipient access, audit ingestion, and LM Studio.
+
 ## License
 
 OpenShare’s code is available under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for project attribution. The Splunk app archive includes both files.
