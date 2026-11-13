@@ -2,7 +2,7 @@
 
 Publish a read-only table from a Splunk Enterprise index or saved report. Choose the fields and time window in Splunk Web, preview the snapshot, and issue an expiring OpenSharing profile. Recipients read the published data over HTTPS with a standard client. They need only the profile and access to the OpenShare gateway.
 
-**[Download OpenShare 0.3.0 (.spl)](https://raw.githubusercontent.com/dpwtheitguy/SplunkAppForOpenShareProtocol/main/packages/openshare-0.3.0.spl)** · [SHA-256 checksum](packages/openshare-0.3.0.spl.sha256) · [Install on Splunk Enterprise](#install-on-splunk-enterprise) · [Run the Docker lab](#run-the-docker-lab)
+**[Download OpenShare 0.3.1 (.spl)](https://raw.githubusercontent.com/dpwtheitguy/SplunkAppForOpenShareProtocol/main/packages/openshare-0.3.1.spl)** · [SHA-256 checksum](packages/openshare-0.3.1.spl.sha256) · [Install on Splunk Enterprise](#install-on-splunk-enterprise) · [Run the Docker lab](#run-the-docker-lab) · [Splunkbase submission](docs/splunkbase/submission.md)
 
 The Splunk package provides the publisher UI and requires a separately deployed OpenShare companion service. It uses the Python standard library and Splunk’s bundled REST bindings, with no packages to install into Splunk’s Python. Parquet and HTTP server libraries live in the companion container. Splunk Cloud Platform, Windows, and clustered deployments are outside the validation scope.
 
@@ -32,7 +32,7 @@ The demo uses synthetic billing and identity events. The recipient container has
 Use the companion source from the same revision as the app. The companion stores grant state and Parquet snapshots in `/data`. Provision a persistent volume and two separate random secrets of at least 32 characters. Use the same integration key on the Splunk and companion hosts. Keep the file-signing key on the companion host.
 
 ```bash
-docker build -t openshare-companion:0.3.0 ./service
+docker build -t openshare-companion:0.3.1 ./service
 docker volume create openshare-data
 docker run -d --name openshare-companion --restart unless-stopped \
   -p 127.0.0.1:9000:9000 \
@@ -42,14 +42,14 @@ docker run -d --name openshare-companion --restart unless-stopped \
   --mount type=bind,source=/path/to/integration-key,target=/run/secrets/integration-key,readonly \
   --mount type=bind,source=/path/to/file-signing-key,target=/run/secrets/file-signing-key,readonly \
   --mount type=volume,source=openshare-data,target=/data \
-  openshare-companion:0.3.0
+  openshare-companion:0.3.1
 ```
 
 Replace the hostname and secret paths with your deployment values. Terminate TLS at a gateway on the companion host. Route the published hostname’s OpenSharing discovery, table, and signed file routes to the loopback service. Use [the lab’s NGINX route rules](lab/nginx.conf) as a starting point and replace the lab hostname, port, certificate paths, and upstream address. Route `POST /private/manage` on a separate private HTTPS listener reachable only by Splunk. Use the configured hostname in the TLS certificate and exclude authorization headers and signed URLs from gateway logs.
 
 ### 2. Install and configure the Splunk app
 
-With the archive and checksum in the same directory, run `sha256sum -c openshare-0.3.0.spl.sha256` before uploading.
+With the archive and checksum in the same directory, run `sha256sum -c openshare-0.3.1.spl.sha256` before uploading.
 
 1. In Splunk Web, go to **Apps → Manage Apps → Install app from file** and upload the versioned `.spl`. For an existing `openshare` install, choose **Upgrade app**.
 2. On the Splunk host, create `$SPLUNK_HOME/etc/apps/openshare/local/openshare.conf` using the example below. The integration key file must be readable by the Splunk OS account and protected from other users. Use the private gateway URL without the `/private/manage` suffix.

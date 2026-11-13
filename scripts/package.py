@@ -35,6 +35,8 @@ def version():
     config = configparser.ConfigParser(interpolation=None)
     config.read(APP / "default/app.conf", encoding="utf-8")
     manifest = json.loads((APP / "app.manifest").read_text(encoding="utf-8"))["info"]["id"]
+    if not config.getboolean("package", "check_for_updates", fallback=False):
+        raise ValueError("Splunkbase releases must explicitly enable [package] check_for_updates.")
     release = config["launcher"]["version"]
     if {config["package"]["id"], config["id"]["name"], manifest["name"]} != {APP.name}:
         raise ValueError("The app folder, package ID, and manifest name must match.")
